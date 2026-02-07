@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '@/lib/axios';
+import api from '@/lib/api';
 
 export function PaymentCallbackPage() {
   const [searchParams] = useSearchParams();

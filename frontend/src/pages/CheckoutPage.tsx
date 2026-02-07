@@ -7,10 +7,10 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { PaystackPayment } from '@/components/PaystackPayment';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { Loader2, CheckCircle, MapPin, Calendar, Moon, Tag, Shield } from 'lucide-react';
-import api from '@/lib/axios';
+import api from '@/lib/api';
 
 interface VoucherProduct {
   id: string;

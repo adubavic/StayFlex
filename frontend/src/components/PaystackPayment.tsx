@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '@/lib/axios';
+import api from '@/lib/api';
 
 // Paystack SDK type declaration
 declare global {
@@ -111,7 +111,7 @@ export function PaystackPayment({
         callback_url: callbackUrl,
       });
 
-      const { authorization_url, reference, success, message } = response.data;
+      const { reference, success, message } = response.data;
 
       if (!success || !reference) {
         toast.error(message || 'Failed to initialize payment');
