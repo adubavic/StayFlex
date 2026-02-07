@@ -306,6 +306,40 @@ class PaymentWebhookRequest(BaseModel):
 
 
 # =====================================================
+# PAYSTACK SCHEMAS
+# =====================================================
+
+class PaystackInitializeRequest(BaseModel):
+    voucher_product_id: str
+    nights_included: int = Field(gt=0, le=14, description="Number of nights (1-14)")
+    email: EmailStr
+    callback_url: Optional[str] = None
+
+
+class PaystackInitializeResponse(BaseModel):
+    success: bool
+    authorization_url: Optional[str] = None
+    reference: Optional[str] = None
+    access_code: Optional[str] = None
+    message: Optional[str] = None
+
+
+class PaystackVerifyResponse(BaseModel):
+    success: bool
+    status: Optional[str] = None
+    reference: Optional[str] = None
+    amount: Optional[int] = None
+    paid_at: Optional[str] = None
+    channel: Optional[str] = None
+    gateway_response: Optional[str] = None
+    message: Optional[str] = None
+
+
+class PaystackConfigResponse(BaseModel):
+    public_key: str
+
+
+# =====================================================
 # PAYOUT SCHEMAS
 # =====================================================
 

@@ -17,6 +17,7 @@ from schemas import *
 from auth import get_password_hash, verify_password, create_access_token, get_current_user
 from services.otp_service import otp_service
 from services.payment_service import payment_service
+from paystack_service import paystack_service
 from services.eligibility_service import get_eligible_properties
 from utils import generate_voucher_code, generate_payout_reference
 
@@ -640,7 +641,245 @@ async def redeem_booking(booking_id: str, redeem_data: BookingRedeemRequest, cur
     }
 
 
-# ===== PAYMENT WEBHOOK =====
+# ===== PAYSTACK PAYMENT ROUTES =====
+
+@api_router.get("/paystack/config", response_model=PaystackConfigResponse)
+async def get_paystack_config():
+    """Get Paystack public key for frontend initialization."""
+    return {"public_key": paystack_service.public_key}
+
+
+@api_router.post("/paystack/initialize", response_model=PaystackInitializeResponse)
+async def initialize_paystack_payment(
+    payment_data: PaystackInitializeRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Initialize a Paystack payment for voucher purchase.
+    Returns authorization URL for redirect or Paystack inline payment.
+    """
+    if current_user["user_type"] != "user":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only users can make payments")
+    
+    # Fetch the voucher product
+    from uuid import UUID
+    try:
+        product_uuid = UUID(payment_data.voucher_product_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid voucher product ID")
+    
+    product_result = await db.execute(
+        select(VoucherProduct).where(VoucherProduct.id == product_uuid)
+    )
+    product = product_result.scalar_one_or_none()
+    
+    if not product:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voucher product not found")
+    if not product.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Voucher product is not available")
+    
+    nights = payment_data.nights_included
+    
+    # Calculate pricing
+    original_value_kobo = product.max_price_per_night_kobo * nights
+    purchase_price_kobo = int(original_value_kobo * (100 - product.discount_percentage) / 100)
+    
+    # Get user email
+    user_result = await db.execute(select(User).where(User.id == current_user["user_id"]))
+    user = user_result.scalar_one()
+    
+    # Prepare metadata
+    metadata = {
+        "user_id": str(current_user["user_id"]),
+        "voucher_product_id": payment_data.voucher_product_id,
+        "nights_included": nights,
+        "product_name": product.name,
+        "original_value_kobo": original_value_kobo,
+        "discount_percentage": product.discount_percentage,
+        "customer_email": user.email
+    }
+    
+    # Initialize Paystack transaction
+    result = paystack_service.initialize_transaction(
+        email=payment_data.email,
+        amount_kobo=purchase_price_kobo,
+        callback_url=payment_data.callback_url,
+        metadata=metadata
+    )
+    
+    if result["success"]:
+        # Create pending voucher and payment records
+        today = date.today()
+        valid_from = today
+        valid_until = today + timedelta(days=product.validity_days)
+        code = generate_voucher_code()
+        
+        voucher = Voucher(
+            user_id=current_user["user_id"],
+            voucher_product_id=product.id,
+            code=code,
+            city=product.city,
+            status='created',
+            purchase_price_kobo=purchase_price_kobo,
+            original_value_kobo=original_value_kobo,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            nights_included=nights
+        )
+        db.add(voucher)
+        await db.flush()
+        
+        payment = Payment(
+            user_id=current_user["user_id"],
+            voucher_id=voucher.id,
+            amount_kobo=purchase_price_kobo,
+            payment_reference=result["reference"],
+            payment_method='card',
+            payment_gateway='paystack',
+            status='pending'
+        )
+        db.add(payment)
+        await db.commit()
+        
+        logger.info(f"Paystack payment initialized: {result['reference']} | Voucher: {code}")
+    
+    return PaystackInitializeResponse(**result)
+
+
+@api_router.get("/paystack/verify/{reference}", response_model=PaystackVerifyResponse)
+async def verify_paystack_payment(
+    reference: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Verify a Paystack payment and activate voucher if successful.
+    Can be called after user completes payment.
+    """
+    # Verify transaction with Paystack
+    result = paystack_service.verify_transaction(reference)
+    
+    if not result["success"]:
+        return PaystackVerifyResponse(success=False, message=result.get("message", "Verification failed"))
+    
+    # Find the payment record
+    payment_result = await db.execute(
+        select(Payment).options(selectinload(Payment.voucher)).where(Payment.payment_reference == reference)
+    )
+    payment = payment_result.scalar_one_or_none()
+    
+    if not payment:
+        return PaystackVerifyResponse(success=False, message="Payment record not found")
+    
+    # Verify ownership
+    if str(payment.user_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    
+    # Update payment and voucher status based on verification
+    async with db.begin_nested():
+        if result["status"] == "success":
+            payment.status = 'successful'
+            payment.paid_at = datetime.utcnow()
+            payment.gateway_response = result
+            
+            voucher = payment.voucher
+            if voucher.status == 'created':
+                voucher.status = 'active'
+                voucher.activated_at = datetime.utcnow()
+        else:
+            payment.status = 'failed'
+            payment.gateway_response = result
+        
+        await db.flush()
+    
+    await db.commit()
+    
+    logger.info(f"Paystack payment verified: {reference} | Status: {result['status']}")
+    
+    return PaystackVerifyResponse(
+        success=True,
+        status=result["status"],
+        reference=result["reference"],
+        amount=result["amount"],
+        paid_at=result.get("paid_at"),
+        channel=result.get("channel"),
+        gateway_response=result.get("gateway_response")
+    )
+
+
+@api_router.post("/paystack/webhook")
+async def paystack_webhook(
+    request: Request,
+    x_paystack_signature: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Handle Paystack webhook events.
+    Updates payment and voucher status based on webhook notifications.
+    """
+    body = await request.body()
+    
+    # Verify webhook signature
+    if not x_paystack_signature or not paystack_service.verify_webhook_signature(x_paystack_signature, body):
+        logger.warning("Invalid Paystack webhook signature")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+    
+    try:
+        event_data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
+    
+    # Parse the event
+    event = paystack_service.parse_webhook_event(event_data)
+    event_type = event["event"]
+    reference = event["reference"]
+    
+    if not reference:
+        return {"message": "No reference in event"}
+    
+    # Find the payment record
+    payment_result = await db.execute(
+        select(Payment).options(selectinload(Payment.voucher)).where(Payment.payment_reference == reference)
+    )
+    payment = payment_result.scalar_one_or_none()
+    
+    if not payment:
+        logger.warning(f"Payment not found for webhook: {reference}")
+        return {"message": "Payment not found"}
+    
+    # Process based on event type
+    async with db.begin_nested():
+        if event_type == "charge.success":
+            payment.status = 'successful'
+            payment.paid_at = datetime.utcnow()
+            payment.gateway_response = event_data
+            
+            voucher = payment.voucher
+            if voucher.status == 'created':
+                voucher.status = 'active'
+                voucher.activated_at = datetime.utcnow()
+            
+            logger.info(f"Paystack webhook: Payment successful | Reference: {reference}")
+        
+        elif event_type == "charge.failed":
+            payment.status = 'failed'
+            payment.gateway_response = event_data
+            logger.info(f"Paystack webhook: Payment failed | Reference: {reference}")
+        
+        elif event_type == "refund.processed":
+            payment.status = 'refunded'
+            payment.gateway_response = event_data
+            logger.info(f"Paystack webhook: Payment refunded | Reference: {reference}")
+        
+        await db.flush()
+    
+    await db.commit()
+    
+    return {"message": "Webhook processed", "event": event_type, "reference": reference}
+
+
+# ===== LEGACY PAYMENT WEBHOOK (for backward compatibility) =====
 
 @api_router.post("/payments/webhook")
 async def payment_webhook(request: Request, x_paystack_signature: Optional[str] = Header(None), db: AsyncSession = Depends(get_db)):

@@ -20,6 +20,8 @@ import BookingPage from './pages/BookingPage';
 import AboutPage from './pages/AboutPage';
 import ContactPage from './pages/ContactPage';
 import HelpCenterPage from './pages/HelpCenterPage';
+import CheckoutPage from './pages/CheckoutPage';
+import PaymentCallbackPage from './pages/PaymentCallbackPage';
 
 // Providers
 import { AuthProvider } from './contexts/AuthContext';
@@ -62,7 +64,11 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/my-vouchers" element={<MyVouchersPage />} />
               <Route path="/book/:voucherId" element={<BookingPage />} />
+              <Route path="/checkout/:productId" element={<CheckoutPage />} />
             </Route>
+
+            {/* Payment Callback (No Layout) */}
+            <Route path="/payment/callback" element={<PaymentCallbackPage />} />
 
             {/* Fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />

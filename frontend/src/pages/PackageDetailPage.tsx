@@ -70,25 +70,15 @@ const PackageDetailPage = () => {
   const totalValue = pkg.original_value_kobo * nights;
   const savings = totalValue - totalPrice;
 
-  const handlePurchase = async () => {
+  const handlePurchase = () => {
     if (!isAuthenticated) {
       toast.error('Please log in to purchase');
-      navigate('/login');
+      navigate('/login', { state: { from: `/checkout/${pkg.id}` } });
       return;
     }
 
-    try {
-      await purchaseMutation.mutateAsync({
-        experience_package_id: pkg.id,
-        nights_included: nights,
-        payment_method: 'card',
-        payment_gateway: 'paystack',
-      });
-      setShowPurchaseDialog(false);
-      navigate('/my-vouchers');
-    } catch (error) {
-      // Error handled by mutation
-    }
+    // Navigate to checkout page with nights parameter
+    navigate(`/checkout/${pkg.id}?nights=${nights}`);
   };
 
   const features = [
